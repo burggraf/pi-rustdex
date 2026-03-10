@@ -231,7 +231,6 @@ What repos do I have indexed?
 > 3. **blog**
 >    Path: /Users/me/personal/blog
 >    Indexed: 2024-03-08T16:45:00
-```
 
 ---
 
@@ -239,20 +238,20 @@ What repos do I have indexed?
 
 ### Available Tools
 
-| Tool | What it does | Example query |
+| Tool | Description | Example Query |
 |------|-------------|---------------|
-| `rustdex_index` | Index a codebase | *"Index /path/to/project as 'myproject'"* |
-| `rustdex_search` | Find symbols by exact name | *"Find the function validateUser in myproject"* |
-| `rustdex_semantic` | Natural language search | *"Search myproject for 'how we handle errors'"* |
-| `rustdex_routes` | Find HTTP routes | *"Show me all API routes in myproject"* |
-| `rustdex_list_repos` | List indexed projects | *"What repos do I have indexed?"* |
-| `rustdex_read_symbol` | Read source code | *"Show me the source for validateUser"* |
+| `rustdex_index` | Index a codebase | `Index /path/to/project as 'myproject'` |
+| `rustdex_search` | Find symbols by exact name | `Find the function validateUser in myproject` |
+| `rustdex_semantic` | Natural language code search | `Search myproject for 'how we handle errors'` |
+| `rustdex_routes` | Extract HTTP routes from web frameworks | `Show me all API routes in myproject` |
+| `rustdex_list_repos` | List all indexed repositories | `What repos do I have indexed?` |
+| `rustdex_read_symbol` | Read source code by byte range | `Show me the source for validateUser` |
 
 ### Available Commands
 
 | Command | Description |
 |---------|-------------|
-| `/rustdex-status` | Check if RustDex is installed |
+| `/rustdex-status` | Check if RustDex binary is installed and accessible |
 
 ---
 
@@ -260,66 +259,81 @@ What repos do I have indexed?
 
 ### Flow 1: Exploring a New Codebase
 
-**You:** Index /Users/me/work/legacy-api as "legacy"
-
-**Pi:** ✅ Successfully indexed legacy-api.
-
-**You:** Show me all the POST routes in legacy
-
-**Pi:** [Lists 12 POST routes across various files]
-
-**You:** Search legacy for "user authentication middleware"
-
-**Pi:** [Finds authMiddleware function with 92% relevance]
-
-**You:** Show me the source code for authMiddleware
-
-**Pi:** [Displays the full function source]
+> **You:** Index /Users/me/work/legacy-api as "legacy"
+>
+> **Pi:** ✅ Successfully indexed legacy-api.
+>
+> **You:** Show me all the POST routes in legacy
+>
+> **Pi:** [Lists 12 POST routes across various files]
+>
+> **You:** Search legacy for "user authentication middleware"
+>
+> **Pi:** [Finds authMiddleware function with 92% relevance]
+>
+> **You:** Show me the source code for authMiddleware
+>
+> **Pi:** [Displays the full function source]
 
 ### Flow 2: Finding and Fixing a Bug
 
-**You:** Search blog for "image upload handling"
-
-**Pi:** [Found processImageUpload function]
-
-**You:** Show me the source
-
-**Pi:** [Displays code showing the bug]
-
-**You:** [Edit the file to fix the bug]
+> **You:** Search blog for "image upload handling"
+>
+> **Pi:** [Found processImageUpload function]
+>
+> **You:** Show me the source
+>
+> **Pi:** [Displays code showing the bug]
+>
+> **You:** [Edit the file to fix the bug]
 
 ### Flow 3: Understanding Code Structure
 
-**You:** What repos do I have indexed?
-
-**Pi:** [Lists 5 projects]
-
-**You:** Search api for "database connection pooling"
-
-**Pi:** [Finds connection pool configuration]
-
-**You:** Search api for "all exported functions in the db module"
-
-**Pi:** [Lists relevant functions]
+> **You:** What repos do I have indexed?
+>
+> **Pi:** [Lists 5 projects]
+>
+> **You:** Search api for "database connection pooling"
+>
+> **Pi:** [Finds connection pool configuration]
+>
+> **You:** Search api for "all exported functions in the db module"
+>
+> **Pi:** [Lists relevant functions]
 
 ---
 
 ## Supported Languages
 
-RustDex can index and search:
-- **Rust**, **Python**, **JavaScript**, **TypeScript (TSX)**
-- **Go**, **Java**, **PHP**, **C**, **C++**
-- **Elixir**, **Ruby**, **Vue**
+RustDex can index and search code written in:
+
+| Language | File Extensions |
+|----------|-----------------|
+| C | `.c`, `.h` |
+| C++ | `.cpp`, `.cc`, `.cxx`, `.hpp` |
+| Elixir | `.ex`, `.exs` |
+| Go | `.go` |
+| Java | `.java` |
+| JavaScript | `.js`, `.jsx`, `.mjs` |
+| PHP | `.php` |
+| Python | `.py` |
+| Ruby | `.rb` |
+| Rust | `.rs` |
+| TypeScript | `.ts`, `.tsx` |
+| Vue | `.vue` |
 
 ---
 
 ## Storage Location
 
 All data is stored locally in `~/.rustdex/`:
-- `registry.db` - Tracks all projects and their paths
-- `<repo_name>.db` - Index and embeddings for each project
 
-**No data leaves your machine. Everything is 100% local.**
+| File | Purpose |
+|------|---------|
+| `registry.db` | Tracks all indexed projects and their paths |
+| `<repo_name>.db` | Search index and embeddings for each project |
+
+> 🔒 **Privacy:** No code leaves your machine. Everything is 100% local.
 
 ---
 
@@ -328,6 +342,7 @@ All data is stored locally in `~/.rustdex/`:
 ### "RustDex not found" error
 
 Make sure the `rustdex` binary is in your PATH:
+
 ```bash
 which rustdex
 # Should output: /usr/local/bin/rustdex
@@ -339,35 +354,39 @@ sudo mv rustdex /usr/local/bin/
 ### Extension not loading
 
 Check if the extension is installed:
+
 ```bash
 pi list-extensions
 ```
 
 If not listed, reinstall:
+
 ```bash
 pi install npm:pi-rustdex
 ```
 
 ### Indexing takes a long time
 
-Large codebases may take several minutes to index. This is normal - RustDex is analyzing every file and generating ML embeddings locally.
+Large codebases may take several minutes to index. This is normal — RustDex is analyzing every file and generating ML embeddings locally.
 
 ---
 
 ## Why Use RustDex with Pi?
 
-- **🤔 Don't remember file names?** Search by *what the code does*
-- **📚 Large codebase?** Find relevant code in seconds, not minutes
-- **🎯 Token Efficient** - Pi reads only the relevant bytes, not entire files
-- **🔒 100% Private** - No code leaves your machine, no API keys needed
-- **⚡ Fast** - High-performance Rust implementation with Tree-sitter parsing
+| Benefit | Description |
+|---------|-------------|
+| 🎯 **Token Efficient** | Pi reads only the relevant bytes using precise byte ranges, not entire files |
+| 🔒 **100% Private** | No code leaves your machine; no API keys needed |
+| ⚡ **Fast** | High-performance Rust implementation with Tree-sitter parsing |
+| 🧠 **Semantic Search** | Find code by describing what it does, not guessing file names |
+| 📚 **Large Codebases** | Find relevant code in seconds instead of minutes |
 
 ---
 
 ## License
 
-MIT
+MIT License — see [LICENSE](LICENSE) for details.
 
 ## Repository
 
-https://github.com/burggraf/pi-rustdex
+<https://github.com/burggraf/pi-rustdex>
