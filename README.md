@@ -18,32 +18,48 @@ A Pi extension that integrates [RustDex](https://github.com/burggraf/rustdex) - 
 
 ---
 
-## Getting Started (Step by Step)
+## Getting Started
 
-### What You Need
+### Quick Install (Recommended)
 
-Pi-RustDex requires **two** components:
-
-1. **The RustDex binary** - The Rust-based indexer that runs on your machine
-2. **This Pi extension** - The bridge that lets Pi talk to RustDex
-
----
-
-### Step 1: Install the RustDex Binary
-
-**Recommended: Install via npm (automatic)**
-
-The easiest way to install RustDex is via npm. When you install this Pi extension, RustDex will be automatically installed for you:
+**Just run this single command - it installs everything you need:**
 
 ```bash
-# Install this extension - RustDex will be installed automatically
 pi install npm:pi-rustdex
 ```
 
-**Or install RustDex manually via npm:**
+That's it! The RustDex binary will be **automatically installed** (if not already present) during the installation process. You can verify everything is working by typing `/rustdex-status` in any Pi session.
 
+---
+
+### How It Works
+
+When you run `pi install npm:pi-rustdex`:
+
+1. **The Pi extension is installed** - This gives Pi access to RustDex tools
+2. **The RustDex binary is automatically checked** - If it's not installed, it will be installed via npm
+3. **You're ready to go** - No additional steps required!
+
+---
+
+### Manual RustDex Binary Management
+
+The automatic installation should handle everything, but if you need to manage the RustDex binary manually, here are the commands:
+
+**Install RustDex binary manually:**
 ```bash
 npm install -g rustdex
+```
+
+**Uninstall RustDex binary:**
+```bash
+npm uninstall -g rustdex
+```
+
+**Check RustDex version:**
+```bash
+rustdex --version
+# Should output: rustdex 0.4.1 or later
 ```
 
 The npm package automatically detects your platform and downloads the appropriate binary:
@@ -53,9 +69,9 @@ The npm package automatically detects your platform and downloads the appropriat
 
 ---
 
-**Manual Installation (alternative)**
+### Manual Binary Download (Alternative)
 
-If you prefer to install RustDex manually, download a pre-built binary from the [RustDex Releases](https://github.com/burggraf/rustdex/releases) page. The latest release (v0.4.1) includes binaries for all platforms.
+If you prefer to download the binary directly (without npm), you can get it from the [RustDex Releases](https://github.com/burggraf/rustdex/releases) page. The latest release includes binaries for all platforms.
 
 **macOS (Apple Silicon):**
 ```bash
@@ -83,27 +99,13 @@ Move-Item -Path .\rustdex.exe -Destination C:\Windows\System32\
 Remove-Item rustdex.zip
 ```
 
-**Verify installation:**
-```bash
-rustdex --version
-# Should output: rustdex 0.4.1
-
-rustdex --help
-```
-
 > **Don't see your platform?** Build from source: https://github.com/burggraf/rustdex#installation
 
 ---
 
-### Step 2: Install the Pi Extension
+### Alternative Installation Methods
 
-Inside any Pi session, run:
-
-```bash
-pi install npm:pi-rustdex
-```
-
-Or add to your project's `pi.json`:
+**Add to your project's `pi.json`:**
 
 ```json
 {
@@ -111,11 +113,16 @@ Or add to your project's `pi.json`:
 }
 ```
 
-**Verify the extension is loaded:**
+This will load the extension automatically when you start Pi in that project directory.
 
-Type this in Pi:
+---
+
+### Verify Installation
+
+Once installed, verify everything is working by typing this in any Pi session:
+
 ```
 /rustdex-status
 ```
 
-You should see: "RustDex is installed
+You should see a notification confirming that RustDex is installed and ready to use.
