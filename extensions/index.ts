@@ -1,7 +1,8 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
-import { spawnSync } from "node:child_process";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Type } from "@mariozechner/pi-ai";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as path from "node:path";
+import { createInterface } from "node:readline";
 
 /**
  * Execute rustdex command and return parsed JSON result
@@ -52,17 +53,142 @@ function isRustDexAvailable(): boolean {
   return result.status === 0;
 }
 
+/** Apply orange truecolor to text for status bar */
+function orange(text: string): string {
+  return `\x1b[38;2;255;165;0m${text}\x1b[0m`;
+}
+
 export default function (pi: ExtensionAPI) {
-  // Check rustdex availability on startup
+  let watchProcess: ChildProcess | null = null;
+  let indexProcess: ChildProcess | null = null;
+  let isShuttingDown = false;
+
+  /**
+   * Spawn `rustdex index` asynchronously, streaming per-file progress
+   * to the status bar. Returns a promise that resolves when indexing completes.
+   */
+  function runAsyncIndex(
+    projectPath: string,
+    ctx: ExtensionContext
+  ): Promise<{ success: boolean; error?: string }> {
+    return new Promise((resolve) => {
+      const args = ["index", projectPath];
+      const proc = spawn("rustdex", args, {
+        cwd: projectPath,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      indexProcess = proc;
+
+      const rl = createInterface({ input: proc.stdout! });
+
+      rl.on("line", (line: string) => {
+        // Match "Indexing <file>..." lines
+        const match = line.match(/^Indexing\s+(.+)\.\.\.$/);
+        if (match) {
+          const filePath = match[1];
+          const basename = path.basename(filePath);
+          ctx.ui.setStatus("pi-rustdex", orange(`Analyzing ${basename}...`));
+        }
+      });
+
+      let stderrChunks: string[] = [];
+      proc.stderr?.on("data", (data: Buffer) => {
+        stderrChunks.push(data.toString());
+      });
+
+      proc.on("close", (code: number | null) => {
+        indexProcess = null;
+        if (code === 0) {
+          resolve({ success: true });
+        } else {
+          resolve({ success: false, error: stderrChunks.join("") || `Exit code: ${code}` });
+        }
+      });
+
+      proc.on("error", (err: Error) => {
+        indexProcess = null;
+        resolve({ success: false, error: err.message });
+      });
+    });
+  }
+
+  /**
+   * Spawn `rustdex watch` as a long-running background process.
+   * The returned ChildProcess is stored for cleanup on shutdown.
+   */
+  function spawnWatcher(projectPath: string): ChildProcess {
+    const proc = spawn("rustdex", ["watch", projectPath], {
+      cwd: projectPath,
+      stdio: "ignore",
+    });
+
+    proc.on("error", () => {
+      // Watcher failed to start or crashed — not critical
+      if (watchProcess === proc) watchProcess = null;
+    });
+
+    proc.on("exit", () => {
+      if (watchProcess === proc) watchProcess = null;
+    });
+
+    return proc;
+  }
+
+  /** Kill a child process gracefully (SIGTERM, then SIGKILL fallback) */
+  function killProcess(proc: ChildProcess | null): void {
+    if (!proc || proc.killed || proc.exitCode !== null) return;
+    proc.kill("SIGTERM");
+    // Force-kill after 2 seconds if still alive
+    const forceKill = setTimeout(() => {
+      if (!proc.killed && proc.exitCode === null) {
+        proc.kill("SIGKILL");
+      }
+    }, 2000);
+    forceKill.unref();
+  }
+
+  // Auto-index CWD on startup, then spawn watcher
   pi.on("session_start", async (_event, ctx) => {
     if (!isRustDexAvailable()) {
       ctx.ui.notify(
         "RustDex not found. Install from https://github.com/burggraf/rustdex",
         "warning"
       );
-    } else {
-      ctx.ui.setStatus("pi-rustdex", "RustDex Ready");
+      return;
     }
+
+    const projectPath = ctx.cwd;
+    const theme = ctx.ui.theme;
+
+    killProcess(watchProcess);
+    watchProcess = null;
+
+    // Show initial indexing status
+    ctx.ui.setStatus("pi-rustdex", orange("Analyzing project..."));
+
+    // Run index asynchronously with per-file progress
+    const result = await runAsyncIndex(projectPath, ctx);
+
+    if (isShuttingDown) return;
+
+    if (result.success) {
+      ctx.ui.setStatus("pi-rustdex", theme.fg("success", "RustDex Ready"));
+
+      // Start the file watcher in the background
+      watchProcess = spawnWatcher(projectPath);
+    } else {
+      ctx.ui.setStatus("pi-rustdex", theme.fg("warning", "RustDex Index Failed"));
+      ctx.ui.notify(`RustDex indexing failed: ${result.error}`, "warning");
+    }
+  });
+
+  // Clean up background processes on shutdown
+  pi.on("session_shutdown", async (_event, _ctx) => {
+    isShuttingDown = true;
+    killProcess(watchProcess);
+    killProcess(indexProcess);
+    watchProcess = null;
+    indexProcess = null;
   });
 
   // Register: rustdex_index - Index a codebase
@@ -102,8 +228,9 @@ export default function (pi: ExtensionAPI) {
         args.push("--name", params.name);
       }
 
-      onUpdate({
+      onUpdate?.({
         content: [{ type: "text", text: `Indexing ${params.project_path}...` }],
+        details: {},
       });
 
       const result = runRustDex(args);
@@ -233,13 +360,14 @@ export default function (pi: ExtensionAPI) {
         "--json",
       ];
 
-      onUpdate({
+      onUpdate?.({
         content: [
           {
             type: "text",
             text: `Running semantic search for "${params.query}"...`,
           },
         ],
+        details: {},
       });
 
       const result = runRustDex(args);

@@ -1,6 +1,6 @@
 {
   "name": "pi-rustdex",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Pi extension for RustDex - universal code indexer and semantic search",
   "repository": {
     "type": "git",
