@@ -1,7 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@mariozechner/pi-ai";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import * as path from "node:path";
 import { createInterface } from "node:readline";
 
 /**
@@ -58,10 +57,65 @@ function orange(text: string): string {
   return `\x1b[38;2;255;165;0m${text}\x1b[0m`;
 }
 
+const STATUS_KEY = "pi-rustdex";
+const READY_FLASH_MS = 1000;
+const INDEXED_SYMBOL = "⛁";
+const WATCHING_SYMBOL = "◉";
+const STATUS_SEPARATOR = " · ";
+
+type StatusTone = "success" | "warning";
+
 export default function (pi: ExtensionAPI) {
   let watchProcess: ChildProcess | null = null;
   let indexProcess: ChildProcess | null = null;
+  let readyStatusTimeout: ReturnType<typeof setTimeout> | null = null;
   let isShuttingDown = false;
+
+  function clearReadyStatusTimeout(): void {
+    if (!readyStatusTimeout) return;
+    clearTimeout(readyStatusTimeout);
+    readyStatusTimeout = null;
+  }
+
+  function renderStatus(ctx: ExtensionContext, indexTone: StatusTone, watchTone: StatusTone): void {
+    const { theme } = ctx.ui;
+    ctx.ui.setStatus(
+      STATUS_KEY,
+      `${theme.fg(indexTone, INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg(watchTone, WATCHING_SYMBOL)}`
+    );
+  }
+
+  function setNotReadyStatus(ctx: ExtensionContext): void {
+    renderStatus(ctx, "warning", "warning");
+  }
+
+  function setAnalyzingStatus(ctx: ExtensionContext): void {
+    const { theme } = ctx.ui;
+    ctx.ui.setStatus(
+      STATUS_KEY,
+      `${orange(INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("warning", WATCHING_SYMBOL)}`
+    );
+  }
+
+  function syncSteadyStatus(ctx: ExtensionContext): void {
+    if (watchProcess && !watchProcess.killed && watchProcess.exitCode === null) {
+      renderStatus(ctx, "success", "success");
+      return;
+    }
+
+    renderStatus(ctx, "success", "warning");
+  }
+
+  function flashReadyStatus(ctx: ExtensionContext): void {
+    clearReadyStatusTimeout();
+    renderStatus(ctx, "success", "success");
+    readyStatusTimeout = setTimeout(() => {
+      readyStatusTimeout = null;
+      if (isShuttingDown) return;
+      syncSteadyStatus(ctx);
+    }, READY_FLASH_MS);
+    readyStatusTimeout.unref();
+  }
 
   /**
    * Spawn `rustdex index` asynchronously, streaming per-file progress
@@ -85,9 +139,7 @@ export default function (pi: ExtensionAPI) {
         // Match "Indexing <file>..." lines
         const match = line.match(/^Indexing\s+(.+)\.\.\.$/);
         if (match) {
-          const filePath = match[1];
-          const basename = path.basename(filePath);
-          ctx.ui.setStatus("pi-rustdex", orange(`Analyzing ${basename}...`));
+          setAnalyzingStatus(ctx);
         }
       });
 
@@ -116,7 +168,7 @@ export default function (pi: ExtensionAPI) {
    * Spawn `rustdex watch` as a long-running background process.
    * The returned ChildProcess is stored for cleanup on shutdown.
    */
-  function spawnWatcher(projectPath: string): ChildProcess {
+  function spawnWatcher(projectPath: string, ctx: ExtensionContext): ChildProcess {
     const proc = spawn("rustdex", ["watch", projectPath], {
       cwd: projectPath,
       stdio: "ignore",
@@ -124,11 +176,23 @@ export default function (pi: ExtensionAPI) {
 
     proc.on("error", () => {
       // Watcher failed to start or crashed — not critical
-      if (watchProcess === proc) watchProcess = null;
+      if (watchProcess === proc) {
+        watchProcess = null;
+        if (!isShuttingDown) {
+          clearReadyStatusTimeout();
+          syncSteadyStatus(ctx);
+        }
+      }
     });
 
     proc.on("exit", () => {
-      if (watchProcess === proc) watchProcess = null;
+      if (watchProcess === proc) {
+        watchProcess = null;
+        if (!isShuttingDown) {
+          clearReadyStatusTimeout();
+          syncSteadyStatus(ctx);
+        }
+      }
     });
 
     return proc;
@@ -150,6 +214,7 @@ export default function (pi: ExtensionAPI) {
   // Auto-index CWD on startup, then spawn watcher
   pi.on("session_start", async (_event, ctx) => {
     if (!isRustDexAvailable()) {
+      setNotReadyStatus(ctx);
       ctx.ui.notify(
         "RustDex not found. Install from https://github.com/burggraf/rustdex",
         "warning"
@@ -158,13 +223,13 @@ export default function (pi: ExtensionAPI) {
     }
 
     const projectPath = ctx.cwd;
-    const theme = ctx.ui.theme;
 
+    clearReadyStatusTimeout();
     killProcess(watchProcess);
     watchProcess = null;
 
     // Show initial indexing status
-    ctx.ui.setStatus("pi-rustdex", orange("Analyzing project..."));
+    setAnalyzingStatus(ctx);
 
     // Run index asynchronously with per-file progress
     const result = await runAsyncIndex(projectPath, ctx);
@@ -172,12 +237,11 @@ export default function (pi: ExtensionAPI) {
     if (isShuttingDown) return;
 
     if (result.success) {
-      ctx.ui.setStatus("pi-rustdex", theme.fg("success", "RustDex Ready"));
-
-      // Start the file watcher in the background
-      watchProcess = spawnWatcher(projectPath);
+      // Start the file watcher in the background before settling the status.
+      watchProcess = spawnWatcher(projectPath, ctx);
+      flashReadyStatus(ctx);
     } else {
-      ctx.ui.setStatus("pi-rustdex", theme.fg("warning", "RustDex Index Failed"));
+      setNotReadyStatus(ctx);
       ctx.ui.notify(`RustDex indexing failed: ${result.error}`, "warning");
     }
   });
@@ -185,6 +249,7 @@ export default function (pi: ExtensionAPI) {
   // Clean up background processes on shutdown
   pi.on("session_shutdown", async (_event, _ctx) => {
     isShuttingDown = true;
+    clearReadyStatusTimeout();
     killProcess(watchProcess);
     killProcess(indexProcess);
     watchProcess = null;
