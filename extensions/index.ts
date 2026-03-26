@@ -71,6 +71,13 @@ export default function (pi: ExtensionAPI) {
     label: "Index Codebase",
     description:
       "Index a codebase with RustDex for symbol search and semantic search. Creates a local SQLite database with symbol metadata and embeddings.",
+    promptSnippet:
+      "Index a codebase so RustDex tools can search symbols, semantics, routes, and source efficiently.",
+    promptGuidelines: [
+      "Use rustdex_index before other RustDex tools when the repository has not been indexed yet.",
+      "Use rustdex_index when the user wants semantic search, symbol search, or route extraction over a local codebase.",
+      "Pass an absolute project path to rustdex_index.",
+    ],
     parameters: Type.Object({
       project_path: Type.String({
         description: "Absolute path to the project directory to index",
@@ -122,6 +129,13 @@ export default function (pi: ExtensionAPI) {
     label: "Search Symbols",
     description:
       "Search for functions, classes, or methods by exact name across an indexed repository.",
+    promptSnippet:
+      "Find functions, classes, or methods by exact symbol name in an indexed repository.",
+    promptGuidelines: [
+      "Use rustdex_search when you know the exact symbol name you want to inspect.",
+      "Prefer rustdex_search over semantic search for exact identifiers like function, class, or method names.",
+      "After rustdex_search returns byte ranges, use rustdex_read_symbol to read the matched symbol body efficiently.",
+    ],
     parameters: Type.Object({
       query: Type.String({
         description: "Symbol name to search for (e.g., 'validate_user')",
@@ -182,6 +196,13 @@ export default function (pi: ExtensionAPI) {
     label: "Semantic Search",
     description:
       "Search code by natural language description using local BERT embeddings (e.g., 'how do we handle password hashing').",
+    promptSnippet:
+      "Search code by natural-language intent or behavior using local semantic embeddings.",
+    promptGuidelines: [
+      "Use rustdex_semantic when the user describes behavior, architecture, or intent rather than an exact symbol name.",
+      "Prefer rustdex_semantic for questions like 'where do we handle auth', 'how is retry logic implemented', or 'what validates passwords'.",
+      "After rustdex_semantic returns promising hits, use rustdex_read_symbol to inspect the exact source for the best matches.",
+    ],
     parameters: Type.Object({
       query: Type.String({
         description: "Natural language query (e.g., 'user authentication logic')",
@@ -269,6 +290,13 @@ export default function (pi: ExtensionAPI) {
     label: "Extract API Routes",
     description:
       "Extract HTTP routes from web frameworks (Flask, FastAPI, Django, Express) in an indexed repository.",
+    promptSnippet:
+      "Extract HTTP routes from indexed web apps, optionally filtered by method.",
+    promptGuidelines: [
+      "Use rustdex_routes when mapping API surface area or finding handlers for HTTP endpoints.",
+      "Use rustdex_routes instead of text search when the task is 'show me the routes', 'where is POST /login handled', or similar endpoint discovery.",
+      "If a specific route result needs deeper inspection, follow up by reading the referenced file or symbol.",
+    ],
     parameters: Type.Object({
       repo: Type.String({
         description: "Repository name (from rustdex_index)",
@@ -345,6 +373,12 @@ export default function (pi: ExtensionAPI) {
     label: "List Indexed Repos",
     description:
       "List all repositories that have been indexed by RustDex.",
+    promptSnippet:
+      "List repositories already indexed by RustDex so other RustDex tools can target them.",
+    promptGuidelines: [
+      "Use rustdex_list_repos when you need a repo name for another RustDex tool and the indexed repositories are unknown.",
+      "Call rustdex_list_repos before rustdex_search, rustdex_semantic, or rustdex_routes if the repo parameter is ambiguous.",
+    ],
     parameters: Type.Object({}),
     async execute(toolCallId, params: any, signal, onUpdate, ctx) {
       if (!isRustDexAvailable()) {
@@ -396,6 +430,13 @@ export default function (pi: ExtensionAPI) {
     label: "Read Symbol",
     description:
       "Read the actual source code of a symbol using its file path and byte range (from search results).",
+    promptSnippet:
+      "Read the exact source for a symbol using byte ranges returned by RustDex search results.",
+    promptGuidelines: [
+      "Use rustdex_read_symbol after rustdex_search or rustdex_semantic when you want the exact symbol body without reading the whole file.",
+      "Prefer rustdex_read_symbol for token-efficient follow-up inspection of search results.",
+      "Pass the file, start_byte, and end_byte fields returned by RustDex search results directly into rustdex_read_symbol.",
+    ],
     parameters: Type.Object({
       file: Type.String({
         description: "Absolute path to the source file",
