@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.4 - 2026-04-09
+
+### Fixed
+- **Windows compatibility**: `isRustDexAvailable()` now uses `where` on Windows instead of the Unix-only `which` command
+- **Windows compatibility**: `getRustDexPath()` falls back to `USERPROFILE` env var on Windows instead of relying solely on `HOME`
+- Fixes installation detection on Windows (#1)
+
 ## 0.4.3 - 2026-03-21
 
 ### Changed

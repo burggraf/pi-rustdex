@@ -46,7 +46,8 @@ let supportsJsonFlags: { [key: string]: boolean } = {};
  * Check if rustdex binary is available in PATH
  */
 export function isRustDexAvailable(): boolean {
-  const result = spawnSync("which", ["rustdex"], { encoding: "utf-8" });
+  const cmd = process.platform === "win32" ? "where" : "which";
+  const result = spawnSync(cmd, ["rustdex"], { encoding: "utf-8" });
   return result.status === 0;
 }
 
@@ -55,7 +56,8 @@ export function isRustDexAvailable(): boolean {
  */
 function getRustDexPath(): string {
   // Check if we're in development mode with a local build
-  const localBuild = `${process.env.HOME}/dev/rustdex/target/release/rustdex`;
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "";
+  const localBuild = `${homeDir}/dev/rustdex/target/release/rustdex`;
   const fs = require("fs");
   if (fs.existsSync(localBuild)) {
     return localBuild;

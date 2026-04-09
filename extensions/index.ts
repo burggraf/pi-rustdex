@@ -47,7 +47,8 @@ function runRustDex(
  * Check if rustdex binary is available
  */
 function isRustDexAvailable(): boolean {
-  const result = spawnSync("which", ["rustdex"], { encoding: "utf-8" });
+  const cmd = process.platform === "win32" ? "where" : "which";
+  const result = spawnSync(cmd, ["rustdex"], { encoding: "utf-8" });
   return result.status === 0;
 }
 
