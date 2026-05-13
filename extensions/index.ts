@@ -226,12 +226,8 @@ export default function (pi: ExtensionAPI) {
     return error instanceof Error && error.message.includes("stale");
   }
 
-  function isRunning(proc: ChildProcess | null): boolean {
-    return !!proc && !proc.killed && proc.exitCode === null;
-  }
-
-  function getProcessLabel(kind: ProcessKind, proc: ChildProcess | null): string {
-    const status = processState[kind];
+  function getWatchStatusLabel(proc: ChildProcess | null): string {
+    const status = processState.watch;
     const pid =
       typeof proc?.pid === "number"
         ? proc.pid
@@ -240,26 +236,65 @@ export default function (pi: ExtensionAPI) {
           : null;
     const pidText = pid !== null ? `pid=${pid}` : "pid=unknown";
 
-    if (isRunning(proc)) {
-      return `running (${pidText})`;
-    }
-
     switch (status.phase) {
       case "idle":
-        return kind === "watch" ? "not started" : "idle";
+        return "not started";
       case "waiting":
-        return kind === "watch" ? "waiting for index" : "waiting";
+        return "waiting for index";
       case "starting":
         return `starting (${pidText})`;
       case "running":
-        return `running (${pidText})`;
+        return `watching (${pidText})`;
       case "exited":
-        return `exited (${pidText}, code=${status.exitCode ?? "unknown"})`;
+        return `exited unexpectedly (${pidText}, code=${status.exitCode ?? "unknown"})`;
       case "spawn-error":
         return `spawn error (${status.error ?? "unknown"})`;
       case "stopped":
         return "stopped";
     }
+  }
+
+  function getIndexStatusLabel(proc: ChildProcess | null): string {
+    const status = processState.index;
+    const pid =
+      typeof proc?.pid === "number"
+        ? proc.pid
+        : typeof status.pid === "number"
+          ? status.pid
+          : null;
+    const pidText = pid !== null ? `pid=${pid}` : "pid=unknown";
+
+    switch (status.phase) {
+      case "idle":
+        return "idle";
+      case "waiting":
+        return "waiting";
+      case "starting":
+        return `starting (${pidText})`;
+      case "running":
+        return `indexing (${pidText})`;
+      case "stopped":
+      case "exited":
+        return status.exitCode === 0
+          ? `success (${pidText}, code=${status.exitCode ?? "unknown"})`
+          : `failed (${pidText}, code=${status.exitCode ?? "unknown"})`;
+      case "spawn-error":
+        return `spawn error (${status.error ?? "unknown"})`;
+    }
+  }
+
+  function getProcessReason(kind: ProcessKind): string | null {
+    const error = processState[kind].error;
+    if (!error) {
+      return null;
+    }
+
+    const normalized = error.replace(/\s+/g, " ").trim();
+    if (!normalized) {
+      return null;
+    }
+
+    return normalized.length > 240 ? `${normalized.slice(0, 237)}...` : normalized;
   }
 
   function renderStatus(ctx?: ExtensionContext): void {
@@ -1037,16 +1072,28 @@ export default function (pi: ExtensionAPI) {
       const version = rustdexAvailable ? runRustDex(["--version"]) : null;
       const level = rustdexAvailable ? "info" : "error";
 
+      const statusLines = [
+        `pi-rustdex: ${packageVersion}`,
+        rustdexAvailable
+          ? `RustDex CLI: ${version?.success ? version.output : version?.error || "unavailable"}`
+          : "RustDex CLI: not installed",
+        `Last RustDex CLI error code: ${lastRustDexErrorCode ?? "none"}`,
+        `watchProcess: ${getWatchStatusLabel(watchProcess)}`,
+        `indexProcess: ${getIndexStatusLabel(indexProcess)}`,
+      ];
+
+      const watchReason = getProcessReason("watch");
+      if (watchReason) {
+        statusLines.push(`watchReason: ${watchReason}`);
+      }
+
+      const indexReason = getProcessReason("index");
+      if (indexReason) {
+        statusLines.push(`indexReason: ${indexReason}`);
+      }
+
       ctx.ui.notify(
-        [
-          `pi-rustdex: ${packageVersion}`,
-          rustdexAvailable
-            ? `RustDex CLI: ${version?.success ? version.output : version?.error || "unavailable"}`
-            : "RustDex CLI: not installed",
-          `Last RustDex CLI error code: ${lastRustDexErrorCode ?? "none"}`,
-          `watchProcess: ${getProcessLabel("watch", watchProcess)}`,
-          `indexProcess: ${getProcessLabel("index", indexProcess)}`,
-        ].join("\n"),
+        statusLines.join("\n"),
         level
       );
     },
