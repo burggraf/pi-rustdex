@@ -88,13 +88,13 @@ function orange(text: string): string {
 }
 
 const STATUS_KEY = "pi-rustdex";
-const READY_FLASH_MS = 1000;
+const ACTIVE_FLASH_MS = 500;
 const INDEXED_SYMBOL = "⛁";
 const WATCHING_SYMBOL = "◉";
 const STATUS_SEPARATOR = " · ";
 
 type StatusTone = "success" | "warning";
-type UiPhase = "steady" | "not-ready" | "analyzing" | "ready-flash";
+type UiPhase = "steady" | "not-ready";
 type ProcessKind = "watch" | "index";
 type ProcessPhase = "idle" | "starting" | "running" | "exited" | "spawn-error" | "stopped";
 
@@ -113,20 +113,68 @@ export default function (pi: ExtensionAPI) {
     index: { phase: "idle", pid: null, exitCode: null, error: null },
   };
   let uiPhase: UiPhase = "steady";
-  let readyStatusTimeout: ReturnType<typeof setTimeout> | null = null;
+  let activeStatusInterval: ReturnType<typeof setInterval> | null = null;
+  let activeFlashOn = true;
   let isShuttingDown = false;
 
-  function clearReadyStatusTimeout(): void {
-    if (!readyStatusTimeout) return;
-    clearTimeout(readyStatusTimeout);
-    readyStatusTimeout = null;
+  function clearActiveStatusInterval(): void {
+    if (!activeStatusInterval) return;
+    clearInterval(activeStatusInterval);
+    activeStatusInterval = null;
   }
 
-  function setProcessStatus(kind: ProcessKind, patch: Partial<ProcessStatus>): void {
+  function isProcessActive(kind: ProcessKind): boolean {
+    return processState[kind].phase === "starting" || processState[kind].phase === "running";
+  }
+
+  function shouldFlashProcess(kind: ProcessKind): boolean {
+    if (kind === "index") {
+      return isProcessActive("index");
+    }
+
+    return processState.watch.phase === "starting";
+  }
+
+  function syncStatusAnimation(ctx: ExtensionContext): void {
+    const shouldAnimate = uiPhase !== "not-ready" && (shouldFlashProcess("index") || shouldFlashProcess("watch"));
+
+    if (!shouldAnimate) {
+      clearActiveStatusInterval();
+      activeFlashOn = true;
+      return;
+    }
+
+    if (activeStatusInterval) {
+      return;
+    }
+
+    activeFlashOn = true;
+    activeStatusInterval = setInterval(() => {
+      activeFlashOn = !activeFlashOn;
+      if (isShuttingDown) return;
+      renderStatus(ctx);
+    }, ACTIVE_FLASH_MS);
+    activeStatusInterval.unref();
+  }
+
+  function setProcessStatus(
+    kind: ProcessKind,
+    patch: Partial<ProcessStatus>,
+    ctx?: ExtensionContext
+  ): void {
     processState[kind] = {
       ...processState[kind],
       ...patch,
     };
+
+    if (ctx) {
+      syncStatusAnimation(ctx);
+      renderStatus(ctx);
+    }
+  }
+
+  function isStaleContextError(error: unknown): boolean {
+    return error instanceof Error && error.message.includes("stale");
   }
 
   function isRunning(proc: ChildProcess | null): boolean {
@@ -164,64 +212,51 @@ export default function (pi: ExtensionAPI) {
   }
 
   function renderStatus(ctx: ExtensionContext): void {
-    const { theme } = ctx.ui;
+    try {
+      const { theme } = ctx.ui;
 
-    if (uiPhase === "not-ready") {
-      ctx.ui.setStatus(
-        STATUS_KEY,
-        `${theme.fg("warning", INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("warning", WATCHING_SYMBOL)}`
-      );
-      return;
+      if (uiPhase === "not-ready") {
+        ctx.ui.setStatus(
+          STATUS_KEY,
+          `${theme.fg("warning", INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("warning", WATCHING_SYMBOL)}`
+        );
+        return;
+      }
+
+      const indexedStatus = shouldFlashProcess("index")
+        ? activeFlashOn
+          ? orange(INDEXED_SYMBOL)
+          : INDEXED_SYMBOL
+        : theme.fg("success", INDEXED_SYMBOL);
+
+      const watchTone: StatusTone = processState.watch.phase === "running" ? "success" : "warning";
+      const watchingStatus = shouldFlashProcess("watch")
+        ? activeFlashOn
+          ? theme.fg("success", WATCHING_SYMBOL)
+          : WATCHING_SYMBOL
+        : theme.fg(watchTone, WATCHING_SYMBOL);
+
+      ctx.ui.setStatus(STATUS_KEY, `${indexedStatus}${STATUS_SEPARATOR}${watchingStatus}`);
+    } catch (error) {
+      if (isStaleContextError(error)) {
+        clearActiveStatusInterval();
+        return;
+      }
+      throw error;
     }
-
-    if (uiPhase === "analyzing") {
-      ctx.ui.setStatus(
-        STATUS_KEY,
-        `${orange(INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("warning", WATCHING_SYMBOL)}`
-      );
-      return;
-    }
-
-    if (uiPhase === "ready-flash") {
-      ctx.ui.setStatus(
-        STATUS_KEY,
-        `${theme.fg("success", INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("success", WATCHING_SYMBOL)}`
-      );
-      return;
-    }
-
-    const watchTone: StatusTone = processState.watch.phase === "running" ? "success" : "warning";
-    ctx.ui.setStatus(
-      STATUS_KEY,
-      `${theme.fg("success", INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg(watchTone, WATCHING_SYMBOL)}`
-    );
   }
 
   function setNotReadyStatus(ctx: ExtensionContext): void {
     uiPhase = "not-ready";
-    renderStatus(ctx);
-  }
-
-  function setAnalyzingStatus(ctx: ExtensionContext): void {
-    uiPhase = "analyzing";
+    clearActiveStatusInterval();
+    activeFlashOn = true;
     renderStatus(ctx);
   }
 
   function syncSteadyStatus(ctx: ExtensionContext): void {
     uiPhase = "steady";
+    syncStatusAnimation(ctx);
     renderStatus(ctx);
-  }
-
-  function flashReadyStatus(ctx: ExtensionContext): void {
-    clearReadyStatusTimeout();
-    uiPhase = "ready-flash";
-    renderStatus(ctx);
-    readyStatusTimeout = setTimeout(() => {
-      readyStatusTimeout = null;
-      if (isShuttingDown) return;
-      syncSteadyStatus(ctx);
-    }, READY_FLASH_MS);
-    readyStatusTimeout.unref();
   }
 
   /**
@@ -233,12 +268,16 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext
   ): Promise<{ success: boolean; error?: string }> {
     return new Promise((resolve) => {
-      setProcessStatus("index", {
-        phase: "starting",
-        pid: null,
-        exitCode: null,
-        error: null,
-      });
+      setProcessStatus(
+        "index",
+        {
+          phase: "starting",
+          pid: null,
+          exitCode: null,
+          error: null,
+        },
+        ctx
+      );
 
       const args = ["index", projectPath];
       const proc = spawn("rustdex", args, {
@@ -246,21 +285,22 @@ export default function (pi: ExtensionAPI) {
         stdio: ["ignore", "pipe", "pipe"],
       });
       indexProcess = proc;
-      setProcessStatus("index", {
-        phase: "running",
-        pid: typeof proc.pid === "number" ? proc.pid : null,
-        exitCode: null,
-        error: null,
-      });
+      setProcessStatus(
+        "index",
+        {
+          phase: "running",
+          pid: typeof proc.pid === "number" ? proc.pid : null,
+          exitCode: null,
+          error: null,
+        },
+        ctx
+      );
 
       const rl = createInterface({ input: proc.stdout! });
 
       rl.on("line", (line: string) => {
-        // Match "Indexing <file>..." lines
-        const match = line.match(/^Indexing\s+(.+)\.\.\.$/);
-        if (match) {
-          setAnalyzingStatus(ctx);
-        }
+        // Match "Indexing <file>..." lines so stdout stays drained while indexing.
+        line.match(/^Indexing\s+(.+)\.\.\.$/);
       });
 
       let stderrChunks: string[] = [];
@@ -271,12 +311,16 @@ export default function (pi: ExtensionAPI) {
       proc.on("close", (code: number | null) => {
         indexProcess = null;
         const error = code === 0 ? null : stderrChunks.join("") || `Exit code: ${code}`;
-        setProcessStatus("index", {
-          phase: "exited",
-          pid: typeof proc.pid === "number" ? proc.pid : processState.index.pid,
-          exitCode: code,
-          error,
-        });
+        setProcessStatus(
+          "index",
+          {
+            phase: "exited",
+            pid: typeof proc.pid === "number" ? proc.pid : processState.index.pid,
+            exitCode: code,
+            error,
+          },
+          ctx
+        );
         if (code === 0) {
           resolve({ success: true });
         } else {
@@ -289,12 +333,16 @@ export default function (pi: ExtensionAPI) {
 
       proc.on("error", (err: Error) => {
         indexProcess = null;
-        setProcessStatus("index", {
-          phase: "spawn-error",
-          pid: typeof proc.pid === "number" ? proc.pid : null,
-          exitCode: null,
-          error: err.message,
-        });
+        setProcessStatus(
+          "index",
+          {
+            phase: "spawn-error",
+            pid: typeof proc.pid === "number" ? proc.pid : null,
+            exitCode: null,
+            error: err.message,
+          },
+          ctx
+        );
         resolve({ success: false, error: err.message });
       });
     });
@@ -305,48 +353,63 @@ export default function (pi: ExtensionAPI) {
    * The returned ChildProcess is stored for cleanup on shutdown.
    */
   function spawnWatcher(projectPath: string, ctx: ExtensionContext): ChildProcess {
-    setProcessStatus("watch", {
-      phase: "starting",
-      pid: null,
-      exitCode: null,
-      error: null,
-    });
+    setProcessStatus(
+      "watch",
+      {
+        phase: "starting",
+        pid: null,
+        exitCode: null,
+        error: null,
+      },
+      ctx
+    );
 
     const proc = spawn("rustdex", ["watch", projectPath], {
       cwd: projectPath,
       stdio: "ignore",
     });
-    setProcessStatus("watch", {
-      phase: "running",
-      pid: typeof proc.pid === "number" ? proc.pid : null,
-      exitCode: null,
-      error: null,
-    });
+    setProcessStatus(
+      "watch",
+      {
+        phase: "running",
+        pid: typeof proc.pid === "number" ? proc.pid : null,
+        exitCode: null,
+        error: null,
+      },
+      ctx
+    );
 
     proc.on("error", (err) => {
-      setProcessStatus("watch", {
-        phase: "spawn-error",
-        pid: typeof proc.pid === "number" ? proc.pid : processState.watch.pid,
-        exitCode: null,
-        error: err.message,
-      });
+      setProcessStatus(
+        "watch",
+        {
+          phase: "spawn-error",
+          pid: typeof proc.pid === "number" ? proc.pid : processState.watch.pid,
+          exitCode: null,
+          error: err.message,
+        },
+        ctx
+      );
       // Watcher failed to start or crashed — not critical
       if (watchProcess === proc) {
         watchProcess = null;
         if (!isShuttingDown) {
-          clearReadyStatusTimeout();
           syncSteadyStatus(ctx);
         }
       }
     });
 
     proc.on("exit", (code) => {
-      setProcessStatus("watch", {
-        phase: "exited",
-        pid: typeof proc.pid === "number" ? proc.pid : processState.watch.pid,
-        exitCode: code,
-        error: code === 0 ? null : `Exit code: ${code}`,
-      });
+      setProcessStatus(
+        "watch",
+        {
+          phase: "exited",
+          pid: typeof proc.pid === "number" ? proc.pid : processState.watch.pid,
+          exitCode: code,
+          error: code === 0 ? null : `Exit code: ${code}`,
+        },
+        ctx
+      );
       if (typeof code === "number" && code !== 0) {
         lastRustDexErrorCode = code;
       }
@@ -354,7 +417,6 @@ export default function (pi: ExtensionAPI) {
       if (watchProcess === proc) {
         watchProcess = null;
         if (!isShuttingDown) {
-          clearReadyStatusTimeout();
           syncSteadyStatus(ctx);
         }
       }
@@ -401,7 +463,7 @@ export default function (pi: ExtensionAPI) {
 
     const projectPath = ctx.cwd;
 
-    clearReadyStatusTimeout();
+    clearActiveStatusInterval();
     killProcess(watchProcess);
     watchProcess = null;
     setProcessStatus("watch", {
@@ -416,9 +478,7 @@ export default function (pi: ExtensionAPI) {
       exitCode: null,
       error: null,
     });
-
-    // Show initial indexing status
-    setAnalyzingStatus(ctx);
+    syncSteadyStatus(ctx);
 
     // Run index asynchronously with per-file progress
     const result = await runAsyncIndex(projectPath, ctx);
@@ -428,7 +488,7 @@ export default function (pi: ExtensionAPI) {
     if (result.success) {
       // Start the file watcher in the background before settling the status.
       watchProcess = spawnWatcher(projectPath, ctx);
-      flashReadyStatus(ctx);
+      syncSteadyStatus(ctx);
     } else {
       setNotReadyStatus(ctx);
       ctx.ui.notify(`RustDex indexing failed: ${result.error}`, "warning");
@@ -438,7 +498,7 @@ export default function (pi: ExtensionAPI) {
   // Clean up background processes on shutdown
   pi.on("session_shutdown", async (_event, _ctx) => {
     isShuttingDown = true;
-    clearReadyStatusTimeout();
+    clearActiveStatusInterval();
     killProcess(watchProcess);
     killProcess(indexProcess);
     watchProcess = null;
