@@ -1,7 +1,27 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@mariozechner/pi-ai";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
+
+let lastRustDexErrorCode: number | null = null;
+let packageVersionCache: string | null | undefined;
+
+function getPackageVersion(): string | null {
+  if (packageVersionCache !== undefined) {
+    return packageVersionCache;
+  }
+
+  try {
+    const packageJsonPath = new URL("../package.json", import.meta.url);
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8"));
+    packageVersionCache = typeof packageJson.version === "string" ? packageJson.version : null;
+  } catch {
+    packageVersionCache = null;
+  }
+
+  return packageVersionCache;
+}
 
 /**
  * Execute rustdex command and return parsed JSON result
@@ -9,7 +29,7 @@ import { createInterface } from "node:readline";
 function runRustDex(
   args: string[],
   cwd?: string
-): { success: boolean; output: any; error?: string } {
+): { success: boolean; output: any; error?: string; exitCode?: number | null } {
   try {
     const result = spawnSync("rustdex", args, {
       encoding: "utf-8",
@@ -18,14 +38,24 @@ function runRustDex(
     });
 
     if (result.error) {
-      return { success: false, output: null, error: result.error.message };
+      if (typeof result.status === "number" && result.status !== 0) {
+        lastRustDexErrorCode = result.status;
+      }
+      return {
+        success: false,
+        output: null,
+        error: result.error.message,
+        exitCode: result.status,
+      };
     }
 
     if (result.status !== 0) {
+      lastRustDexErrorCode = result.status;
       return {
         success: false,
         output: null,
         error: result.stderr || `Exit code: ${result.status}`,
+        exitCode: result.status,
       };
     }
 
@@ -37,9 +67,9 @@ function runRustDex(
       output = result.stdout.trim();
     }
 
-    return { success: true, output };
+    return { success: true, output, exitCode: result.status };
   } catch (e: any) {
-    return { success: false, output: null, error: e.message };
+    return { success: false, output: null, error: e.message, exitCode: null };
   }
 }
 
@@ -64,10 +94,25 @@ const WATCHING_SYMBOL = "◉";
 const STATUS_SEPARATOR = " · ";
 
 type StatusTone = "success" | "warning";
+type UiPhase = "steady" | "not-ready" | "analyzing" | "ready-flash";
+type ProcessKind = "watch" | "index";
+type ProcessPhase = "idle" | "starting" | "running" | "exited" | "spawn-error" | "stopped";
+
+type ProcessStatus = {
+  phase: ProcessPhase;
+  pid: number | null;
+  exitCode: number | null;
+  error: string | null;
+};
 
 export default function (pi: ExtensionAPI) {
   let watchProcess: ChildProcess | null = null;
   let indexProcess: ChildProcess | null = null;
+  const processState: Record<ProcessKind, ProcessStatus> = {
+    watch: { phase: "idle", pid: null, exitCode: null, error: null },
+    index: { phase: "idle", pid: null, exitCode: null, error: null },
+  };
+  let uiPhase: UiPhase = "steady";
   let readyStatusTimeout: ReturnType<typeof setTimeout> | null = null;
   let isShuttingDown = false;
 
@@ -77,38 +122,100 @@ export default function (pi: ExtensionAPI) {
     readyStatusTimeout = null;
   }
 
-  function renderStatus(ctx: ExtensionContext, indexTone: StatusTone, watchTone: StatusTone): void {
+  function setProcessStatus(kind: ProcessKind, patch: Partial<ProcessStatus>): void {
+    processState[kind] = {
+      ...processState[kind],
+      ...patch,
+    };
+  }
+
+  function isRunning(proc: ChildProcess | null): boolean {
+    return !!proc && !proc.killed && proc.exitCode === null;
+  }
+
+  function getProcessLabel(kind: ProcessKind, proc: ChildProcess | null): string {
+    const status = processState[kind];
+    const pid =
+      typeof proc?.pid === "number"
+        ? proc.pid
+        : typeof status.pid === "number"
+          ? status.pid
+          : null;
+    const pidText = pid !== null ? `pid=${pid}` : "pid=unknown";
+
+    if (isRunning(proc)) {
+      return `running (${pidText})`;
+    }
+
+    switch (status.phase) {
+      case "idle":
+        return kind === "watch" ? "not started" : "idle";
+      case "starting":
+        return `starting (${pidText})`;
+      case "running":
+        return `running (${pidText})`;
+      case "exited":
+        return `exited (${pidText}, code=${status.exitCode ?? "unknown"})`;
+      case "spawn-error":
+        return `spawn error (${status.error ?? "unknown"})`;
+      case "stopped":
+        return "stopped";
+    }
+  }
+
+  function renderStatus(ctx: ExtensionContext): void {
     const { theme } = ctx.ui;
+
+    if (uiPhase === "not-ready") {
+      ctx.ui.setStatus(
+        STATUS_KEY,
+        `${theme.fg("warning", INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("warning", WATCHING_SYMBOL)}`
+      );
+      return;
+    }
+
+    if (uiPhase === "analyzing") {
+      ctx.ui.setStatus(
+        STATUS_KEY,
+        `${orange(INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("warning", WATCHING_SYMBOL)}`
+      );
+      return;
+    }
+
+    if (uiPhase === "ready-flash") {
+      ctx.ui.setStatus(
+        STATUS_KEY,
+        `${theme.fg("success", INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("success", WATCHING_SYMBOL)}`
+      );
+      return;
+    }
+
+    const watchTone: StatusTone = processState.watch.phase === "running" ? "success" : "warning";
     ctx.ui.setStatus(
       STATUS_KEY,
-      `${theme.fg(indexTone, INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg(watchTone, WATCHING_SYMBOL)}`
+      `${theme.fg("success", INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg(watchTone, WATCHING_SYMBOL)}`
     );
   }
 
   function setNotReadyStatus(ctx: ExtensionContext): void {
-    renderStatus(ctx, "warning", "warning");
+    uiPhase = "not-ready";
+    renderStatus(ctx);
   }
 
   function setAnalyzingStatus(ctx: ExtensionContext): void {
-    const { theme } = ctx.ui;
-    ctx.ui.setStatus(
-      STATUS_KEY,
-      `${orange(INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("warning", WATCHING_SYMBOL)}`
-    );
+    uiPhase = "analyzing";
+    renderStatus(ctx);
   }
 
   function syncSteadyStatus(ctx: ExtensionContext): void {
-    if (watchProcess && !watchProcess.killed && watchProcess.exitCode === null) {
-      renderStatus(ctx, "success", "success");
-      return;
-    }
-
-    renderStatus(ctx, "success", "warning");
+    uiPhase = "steady";
+    renderStatus(ctx);
   }
 
   function flashReadyStatus(ctx: ExtensionContext): void {
     clearReadyStatusTimeout();
-    renderStatus(ctx, "success", "success");
+    uiPhase = "ready-flash";
+    renderStatus(ctx);
     readyStatusTimeout = setTimeout(() => {
       readyStatusTimeout = null;
       if (isShuttingDown) return;
@@ -126,12 +233,25 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext
   ): Promise<{ success: boolean; error?: string }> {
     return new Promise((resolve) => {
+      setProcessStatus("index", {
+        phase: "starting",
+        pid: null,
+        exitCode: null,
+        error: null,
+      });
+
       const args = ["index", projectPath];
       const proc = spawn("rustdex", args, {
         cwd: projectPath,
         stdio: ["ignore", "pipe", "pipe"],
       });
       indexProcess = proc;
+      setProcessStatus("index", {
+        phase: "running",
+        pid: typeof proc.pid === "number" ? proc.pid : null,
+        exitCode: null,
+        error: null,
+      });
 
       const rl = createInterface({ input: proc.stdout! });
 
@@ -150,15 +270,31 @@ export default function (pi: ExtensionAPI) {
 
       proc.on("close", (code: number | null) => {
         indexProcess = null;
+        const error = code === 0 ? null : stderrChunks.join("") || `Exit code: ${code}`;
+        setProcessStatus("index", {
+          phase: "exited",
+          pid: typeof proc.pid === "number" ? proc.pid : processState.index.pid,
+          exitCode: code,
+          error,
+        });
         if (code === 0) {
           resolve({ success: true });
         } else {
-          resolve({ success: false, error: stderrChunks.join("") || `Exit code: ${code}` });
+          if (typeof code === "number") {
+            lastRustDexErrorCode = code;
+          }
+          resolve({ success: false, error: error ?? undefined });
         }
       });
 
       proc.on("error", (err: Error) => {
         indexProcess = null;
+        setProcessStatus("index", {
+          phase: "spawn-error",
+          pid: typeof proc.pid === "number" ? proc.pid : null,
+          exitCode: null,
+          error: err.message,
+        });
         resolve({ success: false, error: err.message });
       });
     });
@@ -169,12 +305,31 @@ export default function (pi: ExtensionAPI) {
    * The returned ChildProcess is stored for cleanup on shutdown.
    */
   function spawnWatcher(projectPath: string, ctx: ExtensionContext): ChildProcess {
+    setProcessStatus("watch", {
+      phase: "starting",
+      pid: null,
+      exitCode: null,
+      error: null,
+    });
+
     const proc = spawn("rustdex", ["watch", projectPath], {
       cwd: projectPath,
       stdio: "ignore",
     });
+    setProcessStatus("watch", {
+      phase: "running",
+      pid: typeof proc.pid === "number" ? proc.pid : null,
+      exitCode: null,
+      error: null,
+    });
 
-    proc.on("error", () => {
+    proc.on("error", (err) => {
+      setProcessStatus("watch", {
+        phase: "spawn-error",
+        pid: typeof proc.pid === "number" ? proc.pid : processState.watch.pid,
+        exitCode: null,
+        error: err.message,
+      });
       // Watcher failed to start or crashed — not critical
       if (watchProcess === proc) {
         watchProcess = null;
@@ -185,7 +340,17 @@ export default function (pi: ExtensionAPI) {
       }
     });
 
-    proc.on("exit", () => {
+    proc.on("exit", (code) => {
+      setProcessStatus("watch", {
+        phase: "exited",
+        pid: typeof proc.pid === "number" ? proc.pid : processState.watch.pid,
+        exitCode: code,
+        error: code === 0 ? null : `Exit code: ${code}`,
+      });
+      if (typeof code === "number" && code !== 0) {
+        lastRustDexErrorCode = code;
+      }
+
       if (watchProcess === proc) {
         watchProcess = null;
         if (!isShuttingDown) {
@@ -214,6 +379,18 @@ export default function (pi: ExtensionAPI) {
   // Auto-index CWD on startup, then spawn watcher
   pi.on("session_start", async (_event, ctx) => {
     if (!isRustDexAvailable()) {
+      setProcessStatus("watch", {
+        phase: "stopped",
+        pid: null,
+        exitCode: null,
+        error: null,
+      });
+      setProcessStatus("index", {
+        phase: "stopped",
+        pid: null,
+        exitCode: null,
+        error: null,
+      });
       setNotReadyStatus(ctx);
       ctx.ui.notify(
         "RustDex not found. Install from https://github.com/burggraf/rustdex",
@@ -227,6 +404,18 @@ export default function (pi: ExtensionAPI) {
     clearReadyStatusTimeout();
     killProcess(watchProcess);
     watchProcess = null;
+    setProcessStatus("watch", {
+      phase: "stopped",
+      pid: null,
+      exitCode: null,
+      error: null,
+    });
+    setProcessStatus("index", {
+      phase: "idle",
+      pid: null,
+      exitCode: null,
+      error: null,
+    });
 
     // Show initial indexing status
     setAnalyzingStatus(ctx);
@@ -254,6 +443,18 @@ export default function (pi: ExtensionAPI) {
     killProcess(indexProcess);
     watchProcess = null;
     indexProcess = null;
+    setProcessStatus("watch", {
+      phase: "stopped",
+      pid: null,
+      exitCode: null,
+      error: null,
+    });
+    setProcessStatus("index", {
+      phase: "stopped",
+      pid: null,
+      exitCode: null,
+      error: null,
+    });
   });
 
   // Register: rustdex_index - Index a codebase
@@ -681,22 +882,25 @@ export default function (pi: ExtensionAPI) {
 
   // Register command: /rustdex-status
   pi.registerCommand("rustdex-status", {
-    description: "Check RustDex installation status",
+    description: "Check RustDex installation and process status",
     handler: async (args, ctx) => {
-      if (isRustDexAvailable()) {
-        const version = runRustDex(["--version"]);
-        ctx.ui.notify(
-          `RustDex is installed${
-            version.success ? `: ${version.output}` : ""
-          }`,
-          "info"
-        );
-      } else {
-        ctx.ui.notify(
-          "RustDex not found. Install from https://github.com/burggraf/rustdex",
-          "error"
-        );
-      }
+      const packageVersion = getPackageVersion() ?? "unknown";
+      const rustdexAvailable = isRustDexAvailable();
+      const version = rustdexAvailable ? runRustDex(["--version"]) : null;
+      const level = rustdexAvailable ? "info" : "error";
+
+      ctx.ui.notify(
+        [
+          `pi-rustdex: ${packageVersion}`,
+          rustdexAvailable
+            ? `RustDex CLI: ${version?.success ? version.output : version?.error || "unavailable"}`
+            : "RustDex CLI: not installed",
+          `Last RustDex CLI error code: ${lastRustDexErrorCode ?? "none"}`,
+          `watchProcess: ${getProcessLabel("watch", watchProcess)}`,
+          `indexProcess: ${getProcessLabel("index", indexProcess)}`,
+        ].join("\n"),
+        level
+      );
     },
   });
 }
