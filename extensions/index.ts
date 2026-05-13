@@ -440,6 +440,8 @@ export default function (pi: ExtensionAPI) {
 
   // Auto-index CWD on startup, then spawn watcher
   pi.on("session_start", async (_event, ctx) => {
+    isShuttingDown = false;
+
     if (!isRustDexAvailable()) {
       setProcessStatus("watch", {
         phase: "stopped",
@@ -480,19 +482,19 @@ export default function (pi: ExtensionAPI) {
     });
     syncSteadyStatus(ctx);
 
-    // Run index asynchronously with per-file progress
-    const result = await runAsyncIndex(projectPath, ctx);
+    // Kick indexing off in the background so session startup stays responsive.
+    void runAsyncIndex(projectPath, ctx).then((result) => {
+      if (isShuttingDown) return;
 
-    if (isShuttingDown) return;
-
-    if (result.success) {
-      // Start the file watcher in the background before settling the status.
-      watchProcess = spawnWatcher(projectPath, ctx);
-      syncSteadyStatus(ctx);
-    } else {
-      setNotReadyStatus(ctx);
-      ctx.ui.notify(`RustDex indexing failed: ${result.error}`, "warning");
-    }
+      if (result.success) {
+        // Start the file watcher in the background before settling the status.
+        watchProcess = spawnWatcher(projectPath, ctx);
+        syncSteadyStatus(ctx);
+      } else {
+        setNotReadyStatus(ctx);
+        ctx.ui.notify(`RustDex indexing failed: ${result.error}`, "warning");
+      }
+    });
   });
 
   // Clean up background processes on shutdown
