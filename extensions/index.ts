@@ -82,21 +82,17 @@ function isRustDexAvailable(): boolean {
   return result.status === 0;
 }
 
-/** Apply orange truecolor to text for status bar */
-function orange(text: string): string {
-  return `\x1b[38;2;255;165;0m${text}\x1b[0m`;
-}
-
 const STATUS_KEY = "pi-rustdex";
 const ACTIVE_FLASH_MS = 500;
 const INDEXED_SYMBOL = "⛁";
 const WATCHING_SYMBOL = "◉";
 const STATUS_SEPARATOR = " · ";
 
-type StatusTone = "success" | "warning";
+type StatusRole = "inactive" | "pending" | "healthy" | "error";
+type ThemeTone = "dim" | "warning" | "success" | "error";
 type UiPhase = "steady" | "not-ready";
 type ProcessKind = "watch" | "index";
-type ProcessPhase = "idle" | "starting" | "running" | "exited" | "spawn-error" | "stopped";
+type ProcessPhase = "idle" | "waiting" | "starting" | "running" | "exited" | "spawn-error" | "stopped";
 
 type ProcessStatus = {
   phase: ProcessPhase;
@@ -116,6 +112,20 @@ export default function (pi: ExtensionAPI) {
   let activeStatusInterval: ReturnType<typeof setInterval> | null = null;
   let activeFlashOn = true;
   let isShuttingDown = false;
+  let statusCtx: ExtensionContext | null = null;
+
+  function rememberStatusContext(ctx: ExtensionContext): ExtensionContext {
+    statusCtx = ctx;
+    return ctx;
+  }
+
+  function getStatusContext(ctx?: ExtensionContext): ExtensionContext | null {
+    if (ctx) {
+      return rememberStatusContext(ctx);
+    }
+
+    return statusCtx;
+  }
 
   function clearActiveStatusInterval(): void {
     if (!activeStatusInterval) return;
@@ -123,19 +133,60 @@ export default function (pi: ExtensionAPI) {
     activeStatusInterval = null;
   }
 
-  function isProcessActive(kind: ProcessKind): boolean {
-    return processState[kind].phase === "starting" || processState[kind].phase === "running";
+  function getStatusRole(kind: ProcessKind): StatusRole {
+    const status = processState[kind];
+
+    if (kind === "watch") {
+      switch (status.phase) {
+        case "idle":
+        case "waiting":
+          return "inactive";
+        case "starting":
+          return "pending";
+        case "running":
+          return "healthy";
+        case "exited":
+        case "spawn-error":
+        case "stopped":
+          return "error";
+      }
+    }
+
+    switch (status.phase) {
+      case "idle":
+        return "inactive";
+      case "starting":
+      case "running":
+        return "pending";
+      case "exited":
+        return status.exitCode === 0 ? "healthy" : "error";
+      case "spawn-error":
+      case "stopped":
+        return "error";
+      case "waiting":
+        return "inactive";
+    }
+  }
+
+  function getThemeTone(role: StatusRole): ThemeTone {
+    switch (role) {
+      case "inactive":
+        return "dim";
+      case "pending":
+        return "warning";
+      case "healthy":
+        return "success";
+      case "error":
+        return "error";
+    }
   }
 
   function shouldFlashProcess(kind: ProcessKind): boolean {
-    if (kind === "index") {
-      return isProcessActive("index");
-    }
-
-    return processState.watch.phase === "starting";
+    return getStatusRole(kind) === "pending";
   }
 
-  function syncStatusAnimation(ctx: ExtensionContext): void {
+  function syncStatusAnimation(ctx?: ExtensionContext): void {
+    const targetCtx = getStatusContext(ctx);
     const shouldAnimate = uiPhase !== "not-ready" && (shouldFlashProcess("index") || shouldFlashProcess("watch"));
 
     if (!shouldAnimate) {
@@ -144,7 +195,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    if (activeStatusInterval) {
+    if (!targetCtx || activeStatusInterval) {
       return;
     }
 
@@ -152,7 +203,7 @@ export default function (pi: ExtensionAPI) {
     activeStatusInterval = setInterval(() => {
       activeFlashOn = !activeFlashOn;
       if (isShuttingDown) return;
-      renderStatus(ctx);
+      renderStatus();
     }, ACTIVE_FLASH_MS);
     activeStatusInterval.unref();
   }
@@ -167,10 +218,8 @@ export default function (pi: ExtensionAPI) {
       ...patch,
     };
 
-    if (ctx) {
-      syncStatusAnimation(ctx);
-      renderStatus(ctx);
-    }
+    syncStatusAnimation(ctx);
+    renderStatus(ctx);
   }
 
   function isStaleContextError(error: unknown): boolean {
@@ -198,6 +247,8 @@ export default function (pi: ExtensionAPI) {
     switch (status.phase) {
       case "idle":
         return kind === "watch" ? "not started" : "idle";
+      case "waiting":
+        return kind === "watch" ? "waiting for index" : "waiting";
       case "starting":
         return `starting (${pidText})`;
       case "running":
@@ -211,34 +262,43 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function renderStatus(ctx: ExtensionContext): void {
+  function renderStatus(ctx?: ExtensionContext): void {
+    const targetCtx = getStatusContext(ctx);
+    if (!targetCtx) {
+      return;
+    }
+
     try {
-      const { theme } = ctx.ui;
+      const { theme } = targetCtx.ui;
 
       if (uiPhase === "not-ready") {
-        ctx.ui.setStatus(
+        targetCtx.ui.setStatus(
           STATUS_KEY,
           `${theme.fg("warning", INDEXED_SYMBOL)}${STATUS_SEPARATOR}${theme.fg("warning", WATCHING_SYMBOL)}`
         );
         return;
       }
 
+      const indexRole = getStatusRole("index");
       const indexedStatus = shouldFlashProcess("index")
         ? activeFlashOn
-          ? orange(INDEXED_SYMBOL)
+          ? theme.fg(getThemeTone(indexRole), INDEXED_SYMBOL)
           : INDEXED_SYMBOL
-        : theme.fg("success", INDEXED_SYMBOL);
+        : theme.fg(getThemeTone(indexRole), INDEXED_SYMBOL);
 
-      const watchTone: StatusTone = processState.watch.phase === "running" ? "success" : "warning";
+      const watchRole = getStatusRole("watch");
       const watchingStatus = shouldFlashProcess("watch")
         ? activeFlashOn
-          ? theme.fg("success", WATCHING_SYMBOL)
+          ? theme.fg(getThemeTone(watchRole), WATCHING_SYMBOL)
           : WATCHING_SYMBOL
-        : theme.fg(watchTone, WATCHING_SYMBOL);
+        : theme.fg(getThemeTone(watchRole), WATCHING_SYMBOL);
 
-      ctx.ui.setStatus(STATUS_KEY, `${indexedStatus}${STATUS_SEPARATOR}${watchingStatus}`);
+      targetCtx.ui.setStatus(STATUS_KEY, `${indexedStatus}${STATUS_SEPARATOR}${watchingStatus}`);
     } catch (error) {
       if (isStaleContextError(error)) {
+        if (statusCtx === targetCtx) {
+          statusCtx = null;
+        }
         clearActiveStatusInterval();
         return;
       }
@@ -247,16 +307,18 @@ export default function (pi: ExtensionAPI) {
   }
 
   function setNotReadyStatus(ctx: ExtensionContext): void {
+    rememberStatusContext(ctx);
     uiPhase = "not-ready";
     clearActiveStatusInterval();
     activeFlashOn = true;
-    renderStatus(ctx);
+    renderStatus();
   }
 
   function syncSteadyStatus(ctx: ExtensionContext): void {
+    rememberStatusContext(ctx);
     uiPhase = "steady";
-    syncStatusAnimation(ctx);
-    renderStatus(ctx);
+    syncStatusAnimation();
+    renderStatus();
   }
 
   /**
@@ -438,8 +500,21 @@ export default function (pi: ExtensionAPI) {
     forceKill.unref();
   }
 
+  pi.on("turn_start", async (_event, ctx) => {
+    rememberStatusContext(ctx);
+    syncStatusAnimation();
+    renderStatus();
+  });
+
+  pi.on("turn_end", async (_event, ctx) => {
+    rememberStatusContext(ctx);
+    syncStatusAnimation();
+    renderStatus();
+  });
+
   // Auto-index CWD on startup, then spawn watcher
   pi.on("session_start", async (_event, ctx) => {
+    rememberStatusContext(ctx);
     isShuttingDown = false;
 
     if (!isRustDexAvailable()) {
@@ -469,7 +544,7 @@ export default function (pi: ExtensionAPI) {
     killProcess(watchProcess);
     watchProcess = null;
     setProcessStatus("watch", {
-      phase: "stopped",
+      phase: "waiting",
       pid: null,
       exitCode: null,
       error: null,
@@ -491,7 +566,13 @@ export default function (pi: ExtensionAPI) {
         watchProcess = spawnWatcher(projectPath, ctx);
         syncSteadyStatus(ctx);
       } else {
-        setNotReadyStatus(ctx);
+        setProcessStatus("watch", {
+          phase: "stopped",
+          pid: null,
+          exitCode: null,
+          error: null,
+        }, ctx);
+        syncSteadyStatus(ctx);
         ctx.ui.notify(`RustDex indexing failed: ${result.error}`, "warning");
       }
     });
@@ -505,6 +586,7 @@ export default function (pi: ExtensionAPI) {
     killProcess(indexProcess);
     watchProcess = null;
     indexProcess = null;
+    statusCtx = null;
     setProcessStatus("watch", {
       phase: "stopped",
       pid: null,
@@ -946,6 +1028,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("rustdex-status", {
     description: "Check RustDex installation and process status",
     handler: async (args, ctx) => {
+      rememberStatusContext(ctx);
+      syncStatusAnimation();
+      renderStatus();
+
       const packageVersion = getPackageVersion() ?? "unknown";
       const rustdexAvailable = isRustDexAvailable();
       const version = rustdexAvailable ? runRustDex(["--version"]) : null;
